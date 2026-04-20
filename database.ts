@@ -3,8 +3,10 @@ import fs from 'fs';
 import path from 'path';
 import bcrypt from 'bcryptjs';
 
+console.log('💾 [DB] Connecting to SQLite...');
 const dbPath = path.resolve(process.cwd(), 'database.sqlite');
 const db = new Database(dbPath);
+console.log('✅ [DB] Connected at:', dbPath);
 
 // Initialize tables
 db.exec(`
@@ -115,6 +117,7 @@ if (!adminExists) {
 // Seed officers if not exists
 const officersCount = db.prepare('SELECT COUNT(*) as count FROM officers').get() as { count: number };
 if (officersCount.count === 0) {
+  console.log('🌱 [DB] Seeding officers...');
   const seedOfficers = [
     { name: 'Shri A. K. Sharma', designation: 'Chief Workshop Manager (CWM)', imageUrl: '/uploads/placeholder-cwm.jpg', orderIndex: 1 },
     { name: 'Shri R. K. Singh', designation: 'Dy. Chief Mechanical Engineer (Dy. CME)', imageUrl: '/uploads/placeholder-dycme.jpg', orderIndex: 2 },
@@ -128,6 +131,7 @@ if (officersCount.count === 0) {
 // Seed sliders if not exists
 const slidersCount = db.prepare('SELECT COUNT(*) as count FROM sliders').get() as { count: number };
 if (slidersCount.count === 0) {
+  console.log('🌱 [DB] Seeding sliders...');
   const seedSliders = [
     { title: 'Welcome to Bhavnagar Workshop', imageUrl: '/uploads/placeholder-workshop1.jpg', orderIndex: 1 },
     { title: 'Excellence in Railway Maintenance', imageUrl: '/uploads/placeholder-workshop2.jpg', orderIndex: 2 },
@@ -140,6 +144,7 @@ if (slidersCount.count === 0) {
 // Seed tickers if not exists
 const tickersCount = db.prepare('SELECT COUNT(*) as count FROM tickers').get() as { count: number };
 if (tickersCount.count === 0) {
+  console.log('🌱 [DB] Seeding tickers...');
   const seedTickers = [
     { text: 'Latest Flash: New promotion list for technicians has been published.', isActive: 1 },
     { text: 'Important: Safety week observation starting from next Monday.', isActive: 1 },
@@ -151,6 +156,7 @@ if (tickersCount.count === 0) {
 // Seed notifications if not exists
 const notificationsCount = db.prepare('SELECT COUNT(*) as count FROM notifications').get() as { count: number };
 if (notificationsCount.count === 0) {
+  console.log('🌱 [DB] Seeding notifications...');
   const seedNotifications = [
     { title: 'Promotion Order - Technicians Grade I', pdfUrl: '#' },
     { title: 'Circular regarding Holiday on 15th August', pdfUrl: '#' },
@@ -163,6 +169,7 @@ if (notificationsCount.count === 0) {
 // Seed stats if not exists
 const statsCount = db.prepare('SELECT COUNT(*) as count FROM stats').get() as { count: number };
 if (statsCount.count === 0) {
+  console.log('🌱 [DB] Seeding stats...');
   const seedStats = [
     { key: 'locos', value: '500+', label: 'Locos Repaired', icon: 'Train' },
     { key: 'staff', value: '1000+', label: 'Dedicated Staff', icon: 'Users' },
@@ -175,6 +182,7 @@ if (statsCount.count === 0) {
 // Seed gallery if not exists
 const galleryCount = db.prepare('SELECT COUNT(*) as count FROM gallery').get() as { count: number };
 if (galleryCount.count === 0) {
+  console.log('🌱 [DB] Seeding gallery...');
   const seedGallery = [
     { imageUrl: '/uploads/placeholder-gal1.jpg', caption: 'Workshop Floor' },
     { imageUrl: '/uploads/placeholder-gal2.jpg', caption: 'Maintenance Work' },
@@ -185,5 +193,7 @@ if (galleryCount.count === 0) {
   const insertGallery = db.prepare('INSERT INTO gallery (imageUrl, caption) VALUES (?, ?)');
   seedGallery.forEach(g => insertGallery.run(g.imageUrl, g.caption));
 }
+
+console.log('📦 [DB] Module initialized.');
 
 export default db;

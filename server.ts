@@ -13,10 +13,14 @@ import bcrypt from 'bcryptjs';
 import cookieParser from 'cookie-parser';
 import { createGzip } from 'zlib';
 
+console.log('🚀 [Server] Initializing...');
+
 // --- Security: JWT Secret ---
 const JWT_SECRET = process.env.JWT_SECRET;
+console.log(`🔍 [Auth] JWT_SECRET is ${JWT_SECRET ? 'SET' : 'NOT SET'}`);
+
 if (!JWT_SECRET && process.env.NODE_ENV === 'production') {
-  console.error('FATAL: JWT_SECRET environment variable is not set. Cannot start in production without it.');
+  console.error('❌ FATAL: JWT_SECRET environment variable is not set. Cannot start in production without it.');
   process.exit(1);
 }
 const jwtSecret = JWT_SECRET || 'dev-only-secret-' + Date.now();
@@ -83,7 +87,7 @@ function isValidEmail(email: string): boolean {
 
 async function startServer() {
   const app = express();
-  const PORT = process.env.PORT || 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
   // --- Security & middleware (strict order for CRIS compliance) ---
   const isProduction = process.env.NODE_ENV === 'production';
@@ -618,9 +622,29 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-  });
+  try {
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`✅ [Server] Running on http://0.0.0.0:${PORT}`);
+    });
+  } catch (err) {
+    console.error('❌ [Server] Failed to bind to port:', err);
+    process.exit(1);
+  }
 }
 
-startServer();
+// Global Error Handlers
+process.on('uncaughtException', (err) => {
+  console.error('💥 [Server] Uncaught Exception:', err);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('💥 [Server] Unhandled Rejection at:', promise, 'reason:', reason);
+  process.exit(1);
+});
+
+console.log('🎬 [Server] Calling startServer()...');
+startServer().catch(err => {
+  console.error('❌ [Server] Fatal error in startServer:', err);
+  process.exit(1);
+});
