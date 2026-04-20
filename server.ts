@@ -4,14 +4,14 @@ import { createServer as createViteServer } from 'vite';
 import helmet from 'helmet';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
-import db from './database.js';
+import './database.js'; // This initializes the MongoDB connection
+import * as Models from './models.js';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import cookieParser from 'cookie-parser';
-import { createGzip } from 'zlib';
 
 console.log('🚀 [Server] Initializing...');
 
@@ -75,9 +75,9 @@ function deleteUploadedFile(fileUrl: string) {
   }
 }
 
-/** Escape SQL LIKE wildcards in user input */
-function escapeLikePattern(input: string): string {
-  return input.replace(/[%_\\]/g, '\\$&');
+/** Escape regex wildcards in user input for MongoDB text search */
+function escapeRegex(text: string) {
+  return text.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
 }
 
 /** Validate email format */
@@ -110,10 +110,8 @@ async function startServer() {
   app.use(express.json({ limit: '1mb' }));
   app.use(cookieParser());
 
-  // --- Gzip Compression for responses ---
+  // --- Gzip Compression dummy (standardized in middleware) ---
   app.use((req, res, next) => {
-    const _origJson = res.json.bind(res);
-    // Compression handled by reverse proxy in production; keep simple here
     next();
   });
 
@@ -163,9 +161,9 @@ async function startServer() {
   };
 
   // --- Helper ---
-  const logActivity = (action: string, details: string) => {
+  const logActivity = async (action: string, details: string) => {
     try {
-      db.prepare('INSERT INTO activity_logs (action, details) VALUES (?, ?)').run(action, details);
+      await Models.ActivityLog.create({ action, details });
     } catch (e) {
       console.error('Failed to log activity', e);
     }
@@ -175,16 +173,16 @@ async function startServer() {
   // --- API Routes ---
 
   // Auth
-  app.post('/api/auth/login', (req, res) => {
+  app.post('/api/auth/login', async (req, res) => {
     const { username, password } = req.body;
     if (typeof username !== 'string' || typeof password !== 'string') {
       return res.status(400).json({ error: 'Username and password are required' });
     }
-    const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username.trim()) as any;
+    const user = await Models.User.findOne({ username: username.trim() });
     if (!user || !bcrypt.compareSync(password, user.password)) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
-    const token = jwt.sign({ id: user.id, username: user.username }, jwtSecret, { expiresIn: '8h' });
+    const token = jwt.sign({ id: user._id, username: user.username }, jwtSecret, { expiresIn: '8h' });
     res.cookie('admin_token', token, { httpOnly: true, secure: isProduction, sameSite: 'strict', path: '/' });
     res.json({ success: true });
   });
@@ -198,7 +196,7 @@ async function startServer() {
     res.json({ user: (req as any).user });
   });
 
-  app.put('/api/auth/change-password', authenticate, (req, res) => {
+  app.put('/api/auth/change-password', authenticate, async (req, res) => {
     const { currentPassword, newPassword } = req.body;
     if (typeof currentPassword !== 'string' || typeof newPassword !== 'string') {
       return res.status(400).json({ error: 'currentPassword and newPassword are required' });
@@ -207,109 +205,115 @@ async function startServer() {
       return res.status(400).json({ error: 'New password must be at least 6 characters' });
     }
     const userId = (req as any).user.id;
-    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId) as any;
+    const user = await Models.User.findById(userId);
     if (!user) return res.status(401).json({ error: 'User not found' });
     if (!bcrypt.compareSync(currentPassword, user.password)) {
       return res.status(401).json({ error: 'Current password is incorrect' });
     }
-    const hashed = bcrypt.hashSync(newPassword, 10);
-    db.prepare('UPDATE users SET password = ? WHERE id = ?').run(hashed, userId);
+    user.password = bcrypt.hashSync(newPassword, 10);
+    await user.save();
     logActivity('Security', 'Admin password changed successfully');
     res.json({ success: true, message: 'Password updated successfully' });
   });
 
 
   // Sliders
-  app.get('/api/sliders', (req, res) => {
-    const sliders = db.prepare('SELECT * FROM sliders ORDER BY orderIndex ASC').all();
-    res.json(sliders);
+  app.get('/api/sliders', async (req, res) => {
+    const sliders = await Models.Slider.find().sort({ orderIndex: 1 });
+    res.json(sliders.map(s => ({ ...s.toObject(), id: s._id })));
   });
 
-  app.post('/api/sliders', authenticate, upload.single('image'), (req, res) => {
+  app.post('/api/sliders', authenticate, upload.single('image'), async (req, res) => {
     const { title, orderIndex } = req.body;
     const imageUrl = req.file ? `/uploads/${req.file.filename}` : req.body.imageUrl;
     if (!imageUrl) return res.status(400).json({ error: 'Image is required' });
     
-    const stmt = db.prepare('INSERT INTO sliders (title, imageUrl, orderIndex) VALUES (?, ?, ?)');
-    const info = stmt.run(title || '', imageUrl, orderIndex || 0);
+    const slider = await Models.Slider.create({ title: title || '', imageUrl, orderIndex: Number(orderIndex) || 0 });
     logActivity('Added Slider', `Title: ${title || 'Untitled'}`);
-    res.json({ id: info.lastInsertRowid, title, imageUrl, orderIndex });
+    res.json({ ...slider.toObject(), id: slider._id });
   });
 
-  app.delete('/api/sliders/:id', authenticate, (req, res) => {
-    const row = db.prepare('SELECT imageUrl FROM sliders WHERE id = ?').get(req.params.id) as any;
-    db.prepare('DELETE FROM sliders WHERE id = ?').run(req.params.id);
-    if (row?.imageUrl) deleteUploadedFile(row.imageUrl);
+  app.delete('/api/sliders/:id', authenticate, async (req, res) => {
+    const slider = await Models.Slider.findById(req.params.id);
+    if (slider?.imageUrl) deleteUploadedFile(slider.imageUrl);
+    await Models.Slider.findByIdAndDelete(req.params.id);
     logActivity('Deleted Slider', `ID: ${req.params.id}`);
     res.json({ success: true });
   });
 
-  app.put('/api/sliders/reorder', authenticate, (req, res) => {
+  app.put('/api/sliders/reorder', authenticate, async (req, res) => {
     const items = req.body;
     if (!Array.isArray(items)) return res.status(400).json({ error: 'Body must be an array of { id, orderIndex }' });
-    const stmt = db.prepare('UPDATE sliders SET orderIndex = ? WHERE id = ?');
+    
     for (const { id, orderIndex } of items) {
-      if (typeof id !== 'number' || typeof orderIndex !== 'number') continue;
-      stmt.run(orderIndex, id);
+      if (!id || typeof orderIndex !== 'number') continue;
+      await Models.Slider.findByIdAndUpdate(id, { orderIndex });
     }
     logActivity('Reordered Sliders', 'Updated display order');
     res.json({ success: true });
   });
 
   // Tickers
-  app.get('/api/tickers', (req, res) => {
-    const tickers = db.prepare('SELECT * FROM tickers WHERE isActive = 1').all();
-    res.json(tickers);
+  app.get('/api/tickers', async (req, res) => {
+    const tickers = await Models.Ticker.find({ isActive: true });
+    res.json(tickers.map(t => ({ ...t.toObject(), id: t._id })));
   });
 
-  app.get('/api/admin/tickers', authenticate, (req, res) => {
-    const tickers = db.prepare('SELECT * FROM tickers').all();
-    res.json(tickers);
+  app.get('/api/admin/tickers', authenticate, async (req, res) => {
+    const tickers = await Models.Ticker.find();
+    res.json(tickers.map(t => ({ ...t.toObject(), id: t._id })));
   });
 
-  app.post('/api/tickers', authenticate, (req, res) => {
+  app.post('/api/tickers', authenticate, async (req, res) => {
     const { text, isActive } = req.body;
-    const stmt = db.prepare('INSERT INTO tickers (text, isActive) VALUES (?, ?)');
-    const info = stmt.run(text, isActive === undefined ? 1 : isActive);
+    const ticker = await Models.Ticker.create({ text, isActive: isActive === undefined ? true : isActive });
     logActivity('Added Ticker', `Text: ${text.substring(0, 30)}...`);
-    res.json({ id: info.lastInsertRowid, text, isActive });
+    res.json({ ...ticker.toObject(), id: ticker._id });
   });
 
-  app.put('/api/tickers/:id', authenticate, (req, res) => {
+  app.put('/api/tickers/:id', authenticate, async (req, res) => {
     const id = req.params.id;
     const { isActive } = req.body;
     if (typeof isActive !== 'boolean') {
       return res.status(400).json({ error: 'isActive must be a boolean' });
     }
-    db.prepare('UPDATE tickers SET isActive = ? WHERE id = ?').run(isActive ? 1 : 0, id);
+    await Models.Ticker.findByIdAndUpdate(id, { isActive });
     logActivity('Updated Ticker', `ID: ${id} → ${isActive ? 'Active' : 'Inactive'}`);
     res.json({ success: true, isActive });
   });
 
-  app.delete('/api/tickers/:id', authenticate, (req, res) => {
-    db.prepare('DELETE FROM tickers WHERE id = ?').run(req.params.id);
+  app.delete('/api/tickers/:id', authenticate, async (req, res) => {
+    await Models.Ticker.findByIdAndDelete(req.params.id);
     logActivity('Deleted Ticker', `ID: ${req.params.id}`);
     res.json({ success: true });
   });
 
 
   // Global search (public)
-  app.get('/api/search', (req, res) => {
+  app.get('/api/search', async (req, res) => {
     const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
     if (!q) {
       return res.json({ success: true, results: { notifications: [], tickers: [], gallery: [] } });
     }
-    const escaped = escapeLikePattern(q);
-    const pattern = `%${escaped}%`;
-    const notifications = db.prepare("SELECT id, title, pdfUrl, category, createdAt FROM notifications WHERE title LIKE ? ESCAPE '\\' ORDER BY createdAt DESC LIMIT 20").all(pattern);
-    const tickers = db.prepare("SELECT id, text FROM tickers WHERE isActive = 1 AND text LIKE ? ESCAPE '\\' LIMIT 20").all(pattern);
-    const gallery = db.prepare("SELECT id, imageUrl, caption, createdAt FROM gallery WHERE caption LIKE ? ESCAPE '\\' ORDER BY createdAt DESC LIMIT 20").all(pattern);
-    res.json({ success: true, results: { notifications, tickers, gallery } });
+    const regex = new RegExp(escapeRegex(q), 'i');
+    
+    const notifications = await Models.Notification.find({ title: regex }).sort({ createdAt: -1 }).limit(20);
+    const tickers = await Models.Ticker.find({ isActive: true, text: regex }).limit(20);
+    const gallery = await Models.Gallery.find({ caption: regex }).sort({ createdAt: -1 }).limit(20);
+    
+    res.json({ 
+      success: true, 
+      results: { 
+        notifications: notifications.map(n => ({ ...n.toObject(), id: n._id })), 
+        tickers: tickers.map(t => ({ ...t.toObject(), id: t._id })), 
+        gallery: gallery.map(g => ({ ...g.toObject(), id: g._id })) 
+      } 
+    });
   });
 
 
   // Contact (public)
-  app.post('/api/contact', (req, res) => {
+  app.post('/api/contact', async (req, res) => {
     const { name, email, subject, message } = req.body;
     if (typeof name !== 'string' || !name.trim() || typeof email !== 'string' || !email.trim() || typeof message !== 'string' || !message.trim()) {
       return res.status(400).json({ error: 'Name, email, and message are required' });
@@ -320,256 +324,213 @@ async function startServer() {
     if (name.trim().length > 200 || message.trim().length > 5000) {
       return res.status(400).json({ error: 'Input too long. Name max 200 chars, message max 5000 chars.' });
     }
-    db.prepare('INSERT INTO messages (name, email, subject, message) VALUES (?, ?, ?, ?)').run(
-      name.trim(),
-      email.trim(),
-      typeof subject === 'string' ? subject.trim().slice(0, 500) : '',
-      message.trim()
-    );
+    await Models.Message.create({
+      name: name.trim(),
+      email: email.trim(),
+      subject: typeof subject === 'string' ? subject.trim().slice(0, 500) : '',
+      message: message.trim()
+    });
     res.json({ success: true });
   });
 
   // Notifications
-  app.get('/api/notifications', (req, res) => {
+  app.get('/api/notifications', async (req, res) => {
     const { search, category, page = '1', limit = '10' } = req.query;
-    let query = 'SELECT * FROM notifications WHERE 1=1';
-    const params: any[] = [];
+    const filter: any = {};
 
     if (search) {
-      query += " AND title LIKE ? ESCAPE '\\'";
-      params.push(`%${escapeLikePattern(String(search))}%`);
+      filter.title = new RegExp(escapeRegex(String(search)), 'i');
     }
     if (category && category !== 'All') {
-      query += ' AND category = ?';
-      params.push(category);
+      filter.category = category;
     }
 
-    query += ' ORDER BY createdAt DESC LIMIT ? OFFSET ?';
-    const offset = (Number(page) - 1) * Number(limit);
-    params.push(Number(limit), offset);
+    const skip = (Number(page) - 1) * Number(limit);
+    const notifications = await Models.Notification.find(filter).sort({ createdAt: -1 }).skip(skip).limit(Number(limit));
+    const totalCount = await Models.Notification.countDocuments(filter);
 
-    const notifications = db.prepare(query).all(...params);
-    
-    // Get total count for pagination
-    let countQuery = 'SELECT COUNT(*) as count FROM notifications WHERE 1=1';
-    const countParams: any[] = [];
-    if (search) {
-      countQuery += " AND title LIKE ? ESCAPE '\\'";
-      countParams.push(`%${escapeLikePattern(String(search))}%`);
-    }
-    if (category && category !== 'All') {
-      countQuery += ' AND category = ?';
-      countParams.push(category);
-    }
-    const totalCount = (db.prepare(countQuery).get(...countParams) as any).count;
-
-    res.json({ notifications, totalPages: Math.ceil(totalCount / Number(limit)), currentPage: Number(page) });
+    res.json({ 
+      notifications: notifications.map(n => ({ ...n.toObject(), id: n._id })), 
+      totalPages: Math.ceil(totalCount / Number(limit)), 
+      currentPage: Number(page) 
+    });
   });
 
-  app.post('/api/notifications', authenticate, upload.single('pdf'), (req, res) => {
+  app.post('/api/notifications', authenticate, upload.single('pdf'), async (req, res) => {
     const { title, category = 'General' } = req.body;
     const pdfUrl = req.file ? `/uploads/${req.file.filename}` : req.body.pdfUrl;
     if (!pdfUrl) return res.status(400).json({ error: 'PDF is required' });
 
-    const stmt = db.prepare('INSERT INTO notifications (title, pdfUrl, category) VALUES (?, ?, ?)');
-    const info = stmt.run(title, pdfUrl, category);
+    const notification = await Models.Notification.create({ title, pdfUrl, category });
     logActivity('Added Notification', `Title: ${title}, Category: ${category}`);
-    res.json({ id: info.lastInsertRowid, title, pdfUrl, category });
+    res.json({ ...notification.toObject(), id: notification._id });
   });
 
-  app.delete('/api/notifications/:id', authenticate, (req, res) => {
-    const row = db.prepare('SELECT pdfUrl FROM notifications WHERE id = ?').get(req.params.id) as any;
-    db.prepare('DELETE FROM notifications WHERE id = ?').run(req.params.id);
-    if (row?.pdfUrl) deleteUploadedFile(row.pdfUrl);
+  app.delete('/api/notifications/:id', authenticate, async (req, res) => {
+    const notification = await Models.Notification.findById(req.params.id);
+    if (notification?.pdfUrl) deleteUploadedFile(notification.pdfUrl);
+    await Models.Notification.findByIdAndDelete(req.params.id);
     logActivity('Deleted Notification', `ID: ${req.params.id}`);
     res.json({ success: true });
   });
 
   // Results (LDCE/GDCE etc.)
-  app.get('/api/results', (req, res) => {
+  app.get('/api/results', async (req, res) => {
     const { search, category, page = '1', limit = '10' } = req.query;
-    let query = 'SELECT * FROM results WHERE 1=1';
-    const params: any[] = [];
-    if (search) {
-      query += " AND title LIKE ? ESCAPE '\\'";
-      params.push(`%${escapeLikePattern(String(search))}%`);
-    }
-    if (category && category !== 'All') {
-      query += ' AND category = ?';
-      params.push(category);
-    }
-    query += ' ORDER BY createdAt DESC LIMIT ? OFFSET ?';
-    const offset = (Number(page) - 1) * Number(limit);
-    params.push(Number(limit), offset);
-    const results = db.prepare(query).all(...params);
-    let countQuery = 'SELECT COUNT(*) as count FROM results WHERE 1=1';
-    const countParams: any[] = [];
-    if (search) { countQuery += " AND title LIKE ? ESCAPE '\\'"; countParams.push(`%${escapeLikePattern(String(search))}%`); }
-    if (category && category !== 'All') { countQuery += ' AND category = ?'; countParams.push(category); }
-    const totalCount = (db.prepare(countQuery).get(...countParams) as any).count;
-    res.json({ results, totalPages: Math.ceil(totalCount / Number(limit)), currentPage: Number(page) });
+    const filter: any = {};
+    if (search) filter.title = new RegExp(escapeRegex(String(search)), 'i');
+    if (category && category !== 'All') filter.category = category;
+
+    const skip = (Number(page) - 1) * Number(limit);
+    const results = await Models.Result.find(filter).sort({ createdAt: -1 }).skip(skip).limit(Number(limit));
+    const totalCount = await Models.Result.countDocuments(filter);
+
+    res.json({ 
+      results: results.map(r => ({ ...r.toObject(), id: r._id })), 
+      totalPages: Math.ceil(totalCount / Number(limit)), 
+      currentPage: Number(page) 
+    });
   });
 
-  app.post('/api/results', authenticate, upload.single('pdf'), (req, res) => {
+  app.post('/api/results', authenticate, upload.single('pdf'), async (req, res) => {
     const { title, category = 'General' } = req.body;
     const pdfUrl = req.file ? `/uploads/${req.file.filename}` : req.body.pdfUrl;
     if (!pdfUrl) return res.status(400).json({ error: 'PDF is required' });
-    const stmt = db.prepare('INSERT INTO results (title, pdfUrl, category) VALUES (?, ?, ?)');
-    const info = stmt.run(title || '', pdfUrl, category || 'General');
+    const result = await Models.Result.create({ title: title || '', pdfUrl, category: category || 'General' });
     logActivity('Added Result', `Title: ${title}, Category: ${category}`);
-    res.json({ id: info.lastInsertRowid, title, pdfUrl, category });
+    res.json({ ...result.toObject(), id: result._id });
   });
 
-  app.delete('/api/results/:id', authenticate, (req, res) => {
-    const row = db.prepare('SELECT pdfUrl FROM results WHERE id = ?').get(req.params.id) as any;
-    db.prepare('DELETE FROM results WHERE id = ?').run(req.params.id);
-    if (row?.pdfUrl) deleteUploadedFile(row.pdfUrl);
+  app.delete('/api/results/:id', authenticate, async (req, res) => {
+    const result = await Models.Result.findById(req.params.id);
+    if (result?.pdfUrl) deleteUploadedFile(result.pdfUrl);
+    await Models.Result.findByIdAndDelete(req.params.id);
     logActivity('Deleted Result', `ID: ${req.params.id}`);
     res.json({ success: true });
   });
 
   // Officers
-  app.get('/api/officers', (req, res) => {
-    const officers = db.prepare('SELECT * FROM officers ORDER BY orderIndex ASC').all();
-    res.json(officers);
+  app.get('/api/officers', async (req, res) => {
+    const officers = await Models.Officer.find().sort({ orderIndex: 1 });
+    res.json(officers.map(o => ({ ...o.toObject(), id: o._id })));
   });
 
-  app.post('/api/officers', authenticate, upload.single('image'), (req, res) => {
+  app.post('/api/officers', authenticate, upload.single('image'), async (req, res) => {
     const { name, designation, orderIndex } = req.body;
     const imageUrl = req.file ? `/uploads/${req.file.filename}` : '';
     if (!name || !designation?.trim()) return res.status(400).json({ error: 'Name and designation are required' });
     if (!imageUrl) return res.status(400).json({ error: 'Image file is required' });
-    const stmt = db.prepare('INSERT INTO officers (name, designation, imageUrl, orderIndex) VALUES (?, ?, ?, ?)');
-    const info = stmt.run(name.trim(), designation.trim(), imageUrl, Number(orderIndex) || 0);
+    const officer = await Models.Officer.create({ name: name.trim(), designation: designation.trim(), imageUrl, orderIndex: Number(orderIndex) || 0 });
     logActivity('Added Officer', `Name: ${name.trim()}`);
-    res.json({ id: info.lastInsertRowid, name: name.trim(), designation: designation.trim(), imageUrl, orderIndex: Number(orderIndex) || 0 });
+    res.json({ ...officer.toObject(), id: officer._id });
   });
 
-  app.delete('/api/officers/:id', authenticate, (req, res) => {
-    const row = db.prepare('SELECT imageUrl FROM officers WHERE id = ?').get(req.params.id) as any;
-    db.prepare('DELETE FROM officers WHERE id = ?').run(req.params.id);
-    if (row?.imageUrl) deleteUploadedFile(row.imageUrl);
+  app.delete('/api/officers/:id', authenticate, async (req, res) => {
+    const officer = await Models.Officer.findById(req.params.id);
+    if (officer?.imageUrl) deleteUploadedFile(officer.imageUrl);
+    await Models.Officer.findByIdAndDelete(req.params.id);
     logActivity('Deleted Officer', `ID: ${req.params.id}`);
     res.json({ success: true });
   });
 
-  app.put('/api/officers/:id', authenticate, upload.single('image'), (req, res) => {
+  app.put('/api/officers/:id', authenticate, upload.single('image'), async (req, res) => {
     const { name, designation, orderIndex } = req.body;
     const id = req.params.id;
     
-    let stmt;
+    const updateData: any = { name, designation, orderIndex: Number(orderIndex) || 0 };
     if (req.file) {
-      const imageUrl = `/uploads/${req.file.filename}`;
-      stmt = db.prepare('UPDATE officers SET name = ?, designation = ?, imageUrl = ?, orderIndex = ? WHERE id = ?');
-      stmt.run(name, designation, imageUrl, orderIndex || 0, id);
-    } else {
-      stmt = db.prepare('UPDATE officers SET name = ?, designation = ?, orderIndex = ? WHERE id = ?');
-      stmt.run(name, designation, orderIndex || 0, id);
+      updateData.imageUrl = `/uploads/${req.file.filename}`;
     }
+    
+    await Models.Officer.findByIdAndUpdate(id, updateData);
     logActivity('Updated Officer', `Name: ${name}`);
     res.json({ success: true });
   });
 
-  app.put('/api/officers/reorder', authenticate, (req, res) => {
+  app.put('/api/officers/reorder', authenticate, async (req, res) => {
     const items = req.body;
     if (!Array.isArray(items)) return res.status(400).json({ error: 'Body must be an array of { id, orderIndex }' });
-    const stmt = db.prepare('UPDATE officers SET orderIndex = ? WHERE id = ?');
     for (const { id, orderIndex } of items) {
-      if (typeof id !== 'number' || typeof orderIndex !== 'number') continue;
-      stmt.run(orderIndex, id);
+      if (!id || typeof orderIndex !== 'number') continue;
+      await Models.Officer.findByIdAndUpdate(id, { orderIndex });
     }
     logActivity('Reordered Officers', 'Updated display order');
     res.json({ success: true });
   });
 
   // Gallery
-  app.get('/api/gallery', (req, res) => {
-    const gallery = db.prepare('SELECT * FROM gallery ORDER BY createdAt DESC').all();
-    res.json(gallery);
+  app.get('/api/gallery', async (req, res) => {
+    const gallery = await Models.Gallery.find().sort({ createdAt: -1 });
+    res.json(gallery.map(g => ({ ...g.toObject(), id: g._id })));
   });
 
-  app.post('/api/gallery', authenticate, upload.single('image'), (req, res) => {
+  app.post('/api/gallery', authenticate, upload.single('image'), async (req, res) => {
     const { caption } = req.body;
     const imageUrl = req.file ? `/uploads/${req.file.filename}` : req.body.imageUrl;
     if (!imageUrl) return res.status(400).json({ error: 'Image is required' });
     
-    const stmt = db.prepare('INSERT INTO gallery (imageUrl, caption) VALUES (?, ?)');
-    const info = stmt.run(imageUrl, caption || '');
+    const image = await Models.Gallery.create({ imageUrl, caption: caption || '' });
     logActivity('Added Gallery Image', `Caption: ${caption || 'None'}`);
-    res.json({ id: info.lastInsertRowid, imageUrl, caption });
+    res.json({ ...image.toObject(), id: image._id });
   });
 
-  app.delete('/api/gallery/:id', authenticate, (req, res) => {
-    const row = db.prepare('SELECT imageUrl FROM gallery WHERE id = ?').get(req.params.id) as any;
-    db.prepare('DELETE FROM gallery WHERE id = ?').run(req.params.id);
-    if (row?.imageUrl) deleteUploadedFile(row.imageUrl);
+  app.delete('/api/gallery/:id', authenticate, async (req, res) => {
+    const image = await Models.Gallery.findById(req.params.id);
+    if (image?.imageUrl) deleteUploadedFile(image.imageUrl);
+    await Models.Gallery.findByIdAndDelete(req.params.id);
     logActivity('Deleted Gallery Image', `ID: ${req.params.id}`);
     res.json({ success: true });
   });
 
   // Stats
-  app.get('/api/stats', (req, res) => {
-    const stats = db.prepare('SELECT * FROM stats').all();
-    res.json(stats);
+  app.get('/api/stats', async (req, res) => {
+    const stats = await Models.Stat.find();
+    res.json(stats.map(s => ({ ...s.toObject(), id: s._id })));
   });
 
-  app.put('/api/stats', authenticate, (req, res) => {
+  app.put('/api/stats', authenticate, async (req, res) => {
     const { stats: statsPayload } = req.body;
     if (!Array.isArray(statsPayload)) return res.status(400).json({ error: 'Invalid format' });
 
-    const transaction = db.transaction((items: { label: string; value: string; icon: string }[]) => {
-      db.prepare('DELETE FROM stats').run();
-      const insert = db.prepare('INSERT INTO stats (key, value, label, icon) VALUES (?, ?, ?, ?)');
-      items.forEach((stat, i) => {
-        const label = typeof stat.label === 'string' ? stat.label : '';
-        const value = typeof stat.value === 'string' ? stat.value : '';
-        const icon = typeof stat.icon === 'string' ? stat.icon : '';
-        insert.run(`stat_${i}`, value, label, icon);
-      });
-    });
-    transaction(statsPayload.map((s: any) => ({
-      label: typeof s?.label === 'string' ? s.label : '',
-      value: typeof s?.value === 'string' ? s.value : '',
-      icon: typeof s?.icon === 'string' ? s.icon : '',
-    })));
+    await Models.Stat.deleteMany({});
+    const items = statsPayload.map((s, i) => ({
+      key: `stat_${i}`,
+      value: String(s?.value || ''),
+      label: String(s?.label || ''),
+      icon: String(s?.icon || '')
+    }));
+    await Models.Stat.insertMany(items);
+    
     logActivity('Updated Stats', 'Workshop stats updated');
-    const updated = db.prepare('SELECT * FROM stats ORDER BY id ASC').all();
-    res.json({ success: true, stats: updated });
+    const updated = await Models.Stat.find().sort({ _id: 1 });
+    res.json({ success: true, stats: updated.map(s => ({ ...s.toObject(), id: s._id })) });
   });
 
   // Admin Quick Stats & Logs
-  app.get('/api/admin/quick-stats', authenticate, (req, res) => {
-    const totalPdfs = (db.prepare('SELECT COUNT(*) as count FROM notifications').get() as any).count;
-    const totalSliders = (db.prepare('SELECT COUNT(*) as count FROM sliders').get() as any).count;
-    const totalNews = (db.prepare('SELECT COUNT(*) as count FROM tickers').get() as any).count;
+  app.get('/api/admin/quick-stats', authenticate, async (req, res) => {
+    const totalPdfs = await Models.Notification.countDocuments();
+    const totalSliders = await Models.Slider.countDocuments();
+    const totalNews = await Models.Ticker.countDocuments();
     res.json({ totalPdfs, totalSliders, totalNews });
   });
 
-  app.get('/api/admin/activity-logs', authenticate, (req, res) => {
-    const logs = db.prepare('SELECT * FROM activity_logs ORDER BY timestamp DESC LIMIT 20').all();
-    res.json(logs);
-  });
-
-  // 1-Click Database Backup (authenticated)
-  app.get('/api/admin/backup', authenticate, (req, res) => {
-    const dbPath = path.resolve(process.cwd(), 'database.sqlite');
-    if (!fs.existsSync(dbPath)) {
-      return res.status(404).json({ error: 'Database file not found' });
-    }
-    logActivity('Security', 'System database backup downloaded');
-    res.download(dbPath, 'database.sqlite');
+  app.get('/api/admin/activity-logs', authenticate, async (req, res) => {
+    const logs = await Models.ActivityLog.find().sort({ timestamp: -1 }).limit(20);
+    res.json(logs.map(l => ({ ...l.toObject(), id: l._id })));
   });
 
   // Analytics for dashboard charts (authenticated)
-  app.get('/api/admin/analytics', authenticate, (req, res) => {
-    const notificationsByCategory = db.prepare(
-      'SELECT category AS name, COUNT(*) AS value FROM notifications GROUP BY category'
-    ).all() as { name: string; value: number }[];
-    const resultsByCategory = db.prepare(
-      'SELECT category AS name, COUNT(*) AS value FROM results GROUP BY category'
-    ).all() as { name: string; value: number }[];
-    const readCount = (db.prepare('SELECT COUNT(*) AS count FROM messages WHERE isRead = 1').get() as { count: number }).count;
-    const unreadCount = (db.prepare('SELECT COUNT(*) AS count FROM messages WHERE isRead = 0').get() as { count: number }).count;
+  app.get('/api/admin/analytics', authenticate, async (req, res) => {
+    const notificationsByCategory = await Models.Notification.aggregate([
+      { $group: { _id: "$category", value: { $sum: 1 } } },
+      { $project: { name: "$_id", value: 1, _id: 0 } }
+    ]);
+    const resultsByCategory = await Models.Result.aggregate([
+      { $group: { _id: "$category", value: { $sum: 1 } } },
+      { $project: { name: "$_id", value: 1, _id: 0 } }
+    ]);
+    const readCount = await Models.Message.countDocuments({ isRead: true });
+    const unreadCount = await Models.Message.countDocuments({ isRead: false });
     const messagesStats = [
       { name: 'Read', value: readCount },
       { name: 'Unread', value: unreadCount },
@@ -577,33 +538,34 @@ async function startServer() {
     res.json({ notificationsByCategory, resultsByCategory, messagesStats });
   });
 
-  app.get('/api/admin/messages', authenticate, (req, res) => {
-    const messages = db.prepare('SELECT * FROM messages ORDER BY createdAt DESC').all();
-    res.json(messages);
+  app.get('/api/admin/messages', authenticate, async (req, res) => {
+    const messages = await Models.Message.find().sort({ createdAt: -1 });
+    res.json(messages.map(m => ({ ...m.toObject(), id: m._id })));
   });
 
-  app.put('/api/admin/messages/:id/read', authenticate, (req, res) => {
-    db.prepare('UPDATE messages SET isRead = 1 WHERE id = ?').run(req.params.id);
+  app.put('/api/admin/messages/:id/read', authenticate, async (req, res) => {
+    await Models.Message.findByIdAndUpdate(req.params.id, { isRead: true });
     res.json({ success: true });
   });
 
   // Pages (public read)
-  app.get('/api/pages/:slug', (req, res) => {
-    const page = db.prepare('SELECT title, content FROM pages WHERE slug = ?').get(req.params.slug) as any;
+  app.get('/api/pages/:slug', async (req, res) => {
+    const page = await Models.Page.findOne({ slug: req.params.slug });
     if (!page) return res.status(404).json({ error: 'Page not found' });
     res.json({ success: true, page: { title: page.title, content: page.content } });
   });
 
-  app.put('/api/admin/pages/:slug', authenticate, (req, res) => {
+  app.put('/api/admin/pages/:slug', authenticate, async (req, res) => {
     const slug = req.params.slug;
     const { title, content } = req.body;
     if (typeof title !== 'string' || !title.trim() || typeof content !== 'string') {
       return res.status(400).json({ error: 'title and content are required; title must be non-empty' });
     }
-    db.prepare(`
-      INSERT INTO pages (slug, title, content, updatedAt) VALUES (?, ?, ?, datetime('now'))
-      ON CONFLICT(slug) DO UPDATE SET title = excluded.title, content = excluded.content, updatedAt = datetime('now')
-    `).run(slug, title.trim(), content);
+    await Models.Page.findOneAndUpdate(
+      { slug },
+      { title: title.trim(), content, updatedAt: new Date() },
+      { upsert: true }
+    );
     logActivity('Page Updated', `Slug: ${slug}`);
     res.json({ success: true });
   });
