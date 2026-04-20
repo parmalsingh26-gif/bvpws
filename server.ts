@@ -83,7 +83,7 @@ function isValidEmail(email: string): boolean {
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = process.env.PORT || 3000;
 
   // --- Security & middleware (strict order for CRIS compliance) ---
   const isProduction = process.env.NODE_ENV === 'production';
