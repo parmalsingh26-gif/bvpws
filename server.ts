@@ -142,6 +142,7 @@ async function startServer() {
   app.use('/api', apiLimiter);
 
   app.use('/uploads', express.static(uploadDir, { maxAge: '7d' }));
+  app.use('/assets', express.static(path.resolve(process.cwd(), 'assets'), { maxAge: '30d' }));
 
   // --- Health Check Endpoint ---
   app.get('/api/health', (req, res) => {

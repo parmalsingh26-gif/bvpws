@@ -54,9 +54,9 @@ async function seedDatabase() {
     if (slidersCount === 0) {
       console.log('🌱 [DB] Seeding sliders...');
       const seedSliders = [
-        { title: 'Welcome to Bhavnagar Workshop', imageUrl: '/uploads/placeholder-workshop1.jpg', orderIndex: 1 },
-        { title: 'Excellence in Railway Maintenance', imageUrl: '/uploads/placeholder-workshop2.jpg', orderIndex: 2 },
-        { title: 'Modern Infrastructure', imageUrl: '/uploads/placeholder-workshop3.jpg', orderIndex: 3 },
+        { title: 'Welcome to Bhavnagar Workshop', imageUrl: '/assets/defaults/hero-1.png', orderIndex: 1 },
+        { title: 'Excellence in Railway Maintenance', imageUrl: '/assets/defaults/hero-2.png', orderIndex: 2 },
+        { title: 'Modern Infrastructure', imageUrl: '/assets/defaults/hero-3.png', orderIndex: 3 },
       ];
       await Models.Slider.insertMany(seedSliders);
     }
@@ -101,11 +101,11 @@ async function seedDatabase() {
     if (galleryCount === 0) {
       console.log('🌱 [DB] Seeding gallery...');
       const seedGallery = [
-        { imageUrl: '/uploads/placeholder-gal1.jpg', caption: 'Workshop Floor' },
-        { imageUrl: '/uploads/placeholder-gal2.jpg', caption: 'Maintenance Work' },
-        { imageUrl: '/uploads/placeholder-gal3.jpg', caption: 'Team Meeting' },
-        { imageUrl: '/uploads/placeholder-gal4.jpg', caption: 'Safety Drill' },
-        { imageUrl: '/uploads/placeholder-gal5.jpg', caption: 'New Equipment' },
+        { imageUrl: '/assets/defaults/hero-1.png', caption: 'Bhavnagar Workshop Front View' },
+        { imageUrl: '/assets/defaults/hero-2.png', caption: 'Modern Maintenance Facility' },
+        { imageUrl: '/assets/defaults/hero-3.png', caption: 'Heritage Steam Locomotive' },
+        { imageUrl: '/assets/defaults/gallery-1.png', caption: 'Precision Engineering' },
+        { imageUrl: '/assets/defaults/hero-2.png', caption: 'Workshop Floor Operations' },
       ];
       await Models.Gallery.insertMany(seedGallery);
     }
