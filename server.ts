@@ -4,7 +4,7 @@ import { createServer as createViteServer } from 'vite';
 import helmet from 'helmet';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
-import './database.js'; // This initializes the MongoDB connection
+import { connectDB } from './database.js';
 import * as Models from './models.js';
 import multer from 'multer';
 import path from 'path';
@@ -86,6 +86,9 @@ function isValidEmail(email: string): boolean {
 }
 
 async function startServer() {
+  // Connect to MongoDB FIRST before starting the server
+  await connectDB();
+
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
 

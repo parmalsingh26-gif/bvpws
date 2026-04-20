@@ -4,16 +4,20 @@ import * as Models from './models.js';
 
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/bvpws';
 
-console.log('💾 [DB] Connecting to MongoDB...');
-
-mongoose.connect(MONGODB_URI)
-  .then(() => {
+export async function connectDB() {
+  console.log('💾 [DB] Connecting to MongoDB...');
+  try {
+    await mongoose.connect(MONGODB_URI, {
+      serverSelectionTimeoutMS: 15000,
+      socketTimeoutMS: 45000,
+    });
     console.log('✅ [DB] Connected to MongoDB');
-    seedDatabase();
-  })
-  .catch((err) => {
+    await seedDatabase();
+  } catch (err) {
     console.error('❌ [DB] MongoDB connection error:', err);
-  });
+    throw err; // Let the caller handle the fatal error
+  }
+}
 
 async function seedDatabase() {
   try {
